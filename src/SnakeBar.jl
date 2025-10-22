@@ -707,42 +707,15 @@ function update!(bar::MultiSnakeBAR, n::Int=1)
     """Update all snakes together by n steps - each draws independently"""
     # Batch update: update all snakes' canvas state first, then repaint once
     any_changes = false
-    last_snake_at_100 = false
 
     for snake_idx in 1:bar.n_snakes
         changed = _update_snake_internal!(bar, snake_idx, n)
         any_changes = any_changes || changed
-
-        # Check if last snake reached 100%
-        if snake_idx == bar.n_snakes && bar._progress[snake_idx] >= bar.total
-            last_snake_at_100 = true
-        end
-    end
-
-    # Special handling for last snake at 100% - fill remaining empty cells
-    if last_snake_at_100
-        # Only check the last snake's segment range (where empty cells are likely to be)
-        last_seg_start = bar.segment_boundaries[bar.n_snakes]
-        for k in last_seg_start:length(bar.draw_seq)
-            y, x = bar.draw_seq[k]
-            if 1 <= y <= length(bar.canvas) && 1 <= x <= length(bar.canvas[1])
-                if bar.canvas[y][x] == bar.bg
-                    bar.canvas[y][x] = bar.ch
-                    bar.canvas_colors[y][x] = bar.colors[bar.n_snakes]
-                    bar.canvas_snake_idx[y][x] = bar.n_snakes
-                    bar._dirty = true
-                end
-            end
-        end
     end
 
     # Repaint once at the end if anything changed
-    if any_changes || bar._dirty
-        if last_snake_at_100
-            _repaint(bar; force=true)  # Force final repaint
-        else
-            _repaint(bar)
-        end
+    if any_changes
+        _repaint(bar)
     end
 end
 
@@ -794,25 +767,8 @@ function update_snake!(bar::MultiSnakeBAR, snake_idx::Int, n::Int=1)
     # Update the snake's state
     changed = _update_snake_internal!(bar, snake_idx, n)
 
-    # Special handling for last snake at 100% - ensure it fills to the very end
-    if snake_idx == bar.n_snakes && bar._progress[snake_idx] >= bar.total
-        # Only check the last snake's segment range (where empty cells are likely to be)
-        last_seg_start = bar.segment_boundaries[bar.n_snakes]
-        for k in last_seg_start:length(bar.draw_seq)
-            y, x = bar.draw_seq[k]
-            if 1 <= y <= length(bar.canvas) && 1 <= x <= length(bar.canvas[1])
-                if bar.canvas[y][x] == bar.bg
-                    bar.canvas[y][x] = bar.ch
-                    bar.canvas_colors[y][x] = bar.colors[snake_idx]
-                    bar.canvas_snake_idx[y][x] = snake_idx
-                    bar._dirty = true
-                end
-            end
-        end
-        if bar._dirty
-            _repaint(bar; force=true)  # Force repaint to bypass rate limiting
-        end
-    elseif changed
+    # Repaint if anything changed
+    if changed
         _repaint(bar)
     end
 end
