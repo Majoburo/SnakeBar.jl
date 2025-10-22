@@ -1,0 +1,11 @@
+name = "SnakeBar"
+uuid = "8b9c4a5e-7f1c-4d3a-9e2b-1a4c5d6e7f8a"
+authors = ["Majo Bustamante Rosell"]
+version = "1.0.0"
+
+[deps]
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+
+[compat]
+julia = "1.6"
