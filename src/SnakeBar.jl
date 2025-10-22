@@ -648,19 +648,35 @@ end
 
 function _render_canvas(bar::MultiSnakeBAR)::String
     # Render canvas with colors using IOBuffer for better performance
+    # Optimize: only output color codes when color changes
     io = IOBuffer()
+    current_color = ""
     for (row_idx, row) in enumerate(bar.canvas)
         for (col_idx, char) in enumerate(row)
             color = bar.canvas_colors[row_idx][col_idx]
-            if color != ""
-                print(io, color, char, _RESET_COLOR)
-            else
-                print(io, char)
+            if color != current_color
+                if current_color != ""
+                    print(io, _RESET_COLOR)
+                end
+                if color != ""
+                    print(io, color)
+                end
+                current_color = color
             end
+            print(io, char)
         end
         if row_idx < length(bar.canvas)
+            # Reset color at end of line to avoid bleeding
+            if current_color != ""
+                print(io, _RESET_COLOR)
+                current_color = ""
+            end
             print(io, '\n')
         end
+    end
+    # Final reset if needed
+    if current_color != ""
+        print(io, _RESET_COLOR)
     end
     body = String(take!(io))
     if bar.pad_x > 0 || bar.pad_y > 0 || bar.desc != ""
@@ -687,10 +703,23 @@ function _repaint(bar::MultiSnakeBAR; force::Bool=false)
         return
     end
 
-    # Rate limit repaints to max 60 FPS (16.67ms between frames) unless forced
+    # Adaptive rate limiting: repaint less frequently as canvas fills up
+    # This dramatically speeds up the final iterations
     current_time = time()
-    if !force && (current_time - bar._last_repaint) < 0.0167
-        return
+    if !force
+        # Calculate fill percentage
+        total_cells = length(bar.canvas) * length(bar.canvas[1])
+        filled_cells = sum(bar._progress)
+        fill_ratio = filled_cells / (bar.total * bar.n_snakes)
+
+        # Adaptive interval: start at 60 FPS (16.67ms), slow to 10 FPS (100ms) as it fills
+        min_interval = 0.0167  # 60 FPS
+        max_interval = 0.100   # 10 FPS
+        interval = min_interval + (max_interval - min_interval) * fill_ratio^2
+
+        if (current_time - bar._last_repaint) < interval
+            return
+        end
     end
 
     bar._last_repaint = current_time
