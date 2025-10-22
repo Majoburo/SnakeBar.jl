@@ -187,6 +187,8 @@ mutable struct SnakeBAR
     _start_time::Union{Float64, Nothing}
     _hidden::Bool
     _progress::Int
+    _last_repaint::Float64
+    _dirty::Bool
 
     function SnakeBAR(total::Int; ch::Char='█', bg::Char=' ', seed::Union{Int, Nothing}=nothing,
                       pad_x::Int=0, pad_y::Int=0, desc::String="")
@@ -242,7 +244,7 @@ mutable struct SnakeBAR
         end
 
         new(total, ch, bg, pad_x, pad_y, desc, ham, nrows, ncols, canvas, draw_seq,
-            0, nothing, false, 0)
+            0, nothing, false, 0, 0.0, true)
     end
 end
 
@@ -354,7 +356,21 @@ function _render_canvas(bar::SnakeBAR)::String
     return body
 end
 
-function _repaint(bar::SnakeBAR)
+function _repaint(bar::SnakeBAR; force::Bool=false)
+    # Skip if nothing changed
+    if !bar._dirty && !force
+        return
+    end
+
+    # Rate limit repaints to max 60 FPS (16.67ms between frames) unless forced
+    current_time = time()
+    if !force && (current_time - bar._last_repaint) < 0.0167
+        return
+    end
+
+    bar._last_repaint = current_time
+    bar._dirty = false
+
     print(_HOME)
     print(_render_canvas(bar))
     flush(stdout)
@@ -390,13 +406,15 @@ function update!(bar::SnakeBAR, n::Int=1)
 
     if target_upto > bar._drawn_upto
         bar._drawn_upto = target_upto
+        bar._dirty = true
         _repaint(bar)
     end
 end
 
 function set_description!(bar::SnakeBAR, desc::String)
     bar.desc = desc
-    _repaint(bar)
+    bar._dirty = true
+    _repaint(bar; force=true)
 end
 
 # Convenience function for use with do-block
