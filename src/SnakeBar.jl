@@ -169,6 +169,57 @@ function _rc(idx::Int, ncols::Int)
     return divrem(idx - 1, ncols) .+ (1, 1)
 end
 
+function _compute_draw_sequence(ham::Hamiltonian)::Vector{Tuple{Int, Int}}
+    """Compute the drawing sequence from a Hamiltonian path"""
+    order = []
+    path = ham.path
+    ncols = ham.ncols
+    push!(order, ("center", _rc(path[1], ncols)))
+
+    for k in 1:(length(path) - 1)
+        a, b = path[k], path[k+1]
+        r0, c0 = _rc(a, ncols)
+        r1, c1 = _rc(b, ncols)
+        # edge between adjacent cells in interleaved canvas
+        if r0 != r1
+            y = 2 * min(r0, r1)
+            x = 2 * c0 - 1
+        else
+            y = 2 * r0 - 1
+            x = 2 * min(c0, c1)
+        end
+        push!(order, ("edge", (y, x)))
+        push!(order, ("center", (r1, c1)))
+    end
+
+    # Convert to canvas coordinates
+    draw_seq = Tuple{Int, Int}[]
+    for (kind, val) in order
+        if kind == "center"
+            r, c = val
+            push!(draw_seq, (2*r - 1, 2*c - 1))
+        else
+            y, x = val
+            push!(draw_seq, (y, x))
+        end
+    end
+    return draw_seq
+end
+
+function _fmt_time(t::Float64)::String
+    """Format elapsed time as HH:MM:SS or MM:SS"""
+    if !isfinite(t)
+        return "--:--"
+    end
+    s = Int(round(t))
+    m, s = divrem(s, 60)
+    h, m = divrem(m, 60)
+    if h > 0
+        return @sprintf("%02d:%02d:%02d", h, m, s)
+    end
+    return @sprintf("%02d:%02d", m, s)
+end
+
 mutable struct SnakeBAR
     total::Int
     ch::Char
@@ -207,41 +258,7 @@ mutable struct SnakeBAR
 
         nrows, ncols = ham.nrows, ham.ncols
         canvas = _build_interleaved_canvas(nrows, ncols, bg)
-
-        # Precompute (y, x) draw order: center of first cell, then (edge, next center) pairs
-        order = []
-        path = ham.path
-        push!(order, ("center", _rc(path[1], ncols)))
-
-        for k in 1:(length(path) - 1)
-            a, b = path[k], path[k+1]
-            r0, c0 = _rc(a, ncols)
-            r1, c1 = _rc(b, ncols)
-            # edge between adjacent cells in interleaved canvas
-            if r0 != r1
-                # vertical edge: between rows
-                y = 2 * min(r0, r1)
-                x = 2 * c0 - 1
-            else
-                # horizontal edge: between columns
-                y = 2 * r0 - 1
-                x = 2 * min(c0, c1)
-            end
-            push!(order, ("edge", (y, x)))
-            push!(order, ("center", (r1, c1)))
-        end
-
-        # Convert to canvas coordinates
-        draw_seq = Tuple{Int, Int}[]
-        for (kind, val) in order
-            if kind == "center"
-                r, c = val
-                push!(draw_seq, (2*r - 1, 2*c - 1))  # Adjust for 1-indexing
-            else
-                y, x = val
-                push!(draw_seq, (y, x))
-            end
-        end
+        draw_seq = _compute_draw_sequence(ham)
 
         new(total, ch, bg, pad_x, pad_y, desc, ham, nrows, ncols, canvas, draw_seq,
             0, nothing, false, 0, 0.0, true)
@@ -302,27 +319,13 @@ function _format_status(bar::SnakeBAR)::String
     frac = total > 0 ? done / total : 0.0
     pct = Int(round(frac * 100))
 
-    # timing
     start = bar._start_time === nothing ? time() : bar._start_time
     elapsed = max(0.0, time() - start)
     rate = elapsed > 0 ? done / elapsed : 0.0
     remaining = rate > 0 ? (total - done) / rate : Inf
 
-    function fmt_time(t::Float64)::String
-        if !isfinite(t)
-            return "--:--"
-        end
-        s = Int(round(t))
-        m, s = divrem(s, 60)
-        h, m = divrem(m, 60)
-        if h > 0
-            return @sprintf("%02d:%02d:%02d", h, m, s)
-        end
-        return @sprintf("%02d:%02d", m, s)
-    end
-
-    e_str = fmt_time(elapsed)
-    r_str = fmt_time(remaining)
+    e_str = _fmt_time(elapsed)
+    r_str = _fmt_time(remaining)
     rate_str = @sprintf("%.2f it/s", rate)
     desc = bar.desc != "" ? bar.desc : "Snaking"
     return "$desc $(lpad(pct, 3))%|$done/$total [$e_str<$r_str, $rate_str]"
@@ -467,11 +470,9 @@ mutable struct MultiSnakeBAR
     canvas_colors::Vector{Vector{String}}  # Color for each cell
     canvas_snake_idx::Vector{Vector{Int}}  # Which snake drew each cell (0 = empty)
     draw_seq::Vector{Tuple{Int, Int}}  # Global drawing sequence
-    segment_boundaries::Vector{Int}  # Indices where each snake's section starts
-    snake_segments::Vector{Vector{Tuple{Int, Int}}}  # draw_seq divided into n segments (legacy)
+    segment_boundaries::Vector{Int}  # Indices where each snake's section starts (length n_snakes+1)
 
-    _drawn_upto::Vector{Int}  # one per snake
-    _drawn_upto_global::Int  # global progress through draw_seq
+    _drawn_upto::Vector{Int}  # one per snake - index within that snake's segment
     _start_time::Union{Float64, Nothing}
     _hidden::Bool
     _progress::Vector{Int}  # individual progress per snake
@@ -507,71 +508,24 @@ mutable struct MultiSnakeBAR
 
         nrows, ncols = ham.nrows, ham.ncols
         canvas = _build_interleaved_canvas(nrows, ncols, bg)
-        # Initialize color canvas (empty strings mean no color)
         canvas_colors = [fill("", length(canvas[1])) for _ in 1:length(canvas)]
-        # Initialize snake index tracker (0 = empty, 1-n = snake index)
         canvas_snake_idx = [fill(0, length(canvas[1])) for _ in 1:length(canvas)]
-
-        # Precompute draw order (same as single snake)
-        order = []
-        path = ham.path
-        push!(order, ("center", _rc(path[1], ncols)))
-
-        for k in 1:(length(path) - 1)
-            a, b = path[k], path[k+1]
-            r0, c0 = _rc(a, ncols)
-            r1, c1 = _rc(b, ncols)
-            # edge between adjacent cells in interleaved canvas
-            if r0 != r1
-                # vertical edge: between rows
-                y = 2 * min(r0, r1)
-                x = 2 * c0 - 1
-            else
-                # horizontal edge: between columns
-                y = 2 * r0 - 1
-                x = 2 * min(c0, c1)
-            end
-            push!(order, ("edge", (y, x)))
-            push!(order, ("center", (r1, c1)))
-        end
-
-        # Convert to canvas coordinates
-        draw_seq = Tuple{Int, Int}[]
-        for (kind, val) in order
-            if kind == "center"
-                r, c = val
-                push!(draw_seq, (2*r - 1, 2*c - 1))
-            else
-                y, x = val
-                push!(draw_seq, (y, x))
-            end
-        end
+        draw_seq = _compute_draw_sequence(ham)
 
         # Create non-overlapping segments - each snake gets its own exclusive path section
         total_pts = length(draw_seq)
         segment_size = div(total_pts, n_snakes)
-
-        snake_segments = Vector{Tuple{Int, Int}}[]
         segment_boundaries = Int[]
 
         for i in 1:n_snakes
-            # Non-overlapping: each snake starts where the previous one ended
             start_idx = 1 + (i - 1) * segment_size
-            start_idx = max(1, min(start_idx, total_pts))
-
-            end_idx = min(start_idx + segment_size - 1, total_pts)
-            if i == n_snakes
-                end_idx = total_pts  # Last snake extends to end to cover any remainder
-            end
-
-            push!(segment_boundaries, start_idx)
-            push!(snake_segments, draw_seq[start_idx:end_idx])
+            push!(segment_boundaries, max(1, min(start_idx, total_pts)))
         end
         push!(segment_boundaries, total_pts + 1)
 
         new(total, n_snakes, ch, colors, bg, pad_x, pad_y, desc,
-            ham, nrows, ncols, canvas, canvas_colors, canvas_snake_idx, draw_seq, segment_boundaries, snake_segments,
-            zeros(Int, n_snakes), 0, nothing, false, zeros(Int, n_snakes), 0.0, true)
+            ham, nrows, ncols, canvas, canvas_colors, canvas_snake_idx, draw_seq, segment_boundaries,
+            zeros(Int, n_snakes), nothing, false, zeros(Int, n_snakes), 0.0, true)
     end
 end
 
@@ -599,7 +553,6 @@ function close!(bar::MultiSnakeBAR)
 end
 
 function _format_status(bar::MultiSnakeBAR, max_width::Union{Int,Nothing}=nothing)::String
-    # Calculate overall progress
     done_total = sum(bar._progress)
     total_all = bar.total * bar.n_snakes
     frac = total_all > 0 ? done_total / total_all : 0.0
@@ -610,37 +563,21 @@ function _format_status(bar::MultiSnakeBAR, max_width::Union{Int,Nothing}=nothin
     rate = elapsed > 0 ? done_total / elapsed : 0.0
     remaining = rate > 0 ? (total_all - done_total) / rate : Inf
 
-    function fmt_time(t::Float64)::String
-        if !isfinite(t)
-            return "--:--"
-        end
-        s = Int(round(t))
-        m, s = divrem(s, 60)
-        h, m = divrem(m, 60)
-        if h > 0
-            return @sprintf("%02d:%02d:%02d", h, m, s)
-        end
-        return @sprintf("%02d:%02d", m, s)
-    end
-
-    e_str = fmt_time(elapsed)
-    r_str = fmt_time(remaining)
+    e_str = _fmt_time(elapsed)
+    r_str = _fmt_time(remaining)
     rate_str = @sprintf("%.2f it/s", rate)
     desc = bar.desc != "" ? bar.desc : "Multi-snaking ($(bar.n_snakes) snakes)"
 
-    # Show individual snake progress
     snake_status = join(["S$(i):$(bar._progress[i])/$(bar.total)" for i in 1:bar.n_snakes], " ")
-
     status = "$desc $(lpad(pct, 3))%|$done_total/$total_all [$snake_status] [$e_str<$r_str, $rate_str]"
 
-    # Truncate to max_width if specified to prevent wrapping
-    if max_width !== nothing && length(status) > max_width
-        status = status[1:max_width-3] * "..."
-    end
-
-    # Pad to consistent width to prevent jitter
-    if max_width !== nothing && length(status) < max_width
-        status = rpad(status, max_width)
+    # Truncate or pad to max_width if specified
+    if max_width !== nothing
+        if length(status) > max_width
+            status = status[1:max_width-3] * "..."
+        else
+            status = rpad(status, max_width)
+        end
     end
 
     return status
@@ -754,23 +691,18 @@ function _update_snake_internal!(bar::MultiSnakeBAR, snake_idx::Int, n::Int)
     done = min(bar.total, bar._progress[snake_idx] + n)
     bar._progress[snake_idx] = done
 
-    # Each snake draws through its own segment
-    segment = bar.snake_segments[snake_idx]
-    total_pts = length(segment)
+    # Compute this snake's segment range on-the-fly
+    seg_start = bar.segment_boundaries[snake_idx]
+    seg_end = bar.segment_boundaries[snake_idx + 1] - 1
+    total_pts = seg_end - seg_start + 1
 
-    if done >= bar.total
-        target_upto = total_pts
-    else
-        frac = done / bar.total
-        target_upto = Int(ceil(frac * total_pts))
-    end
+    target_upto = done >= bar.total ? total_pts : Int(ceil((done / bar.total) * total_pts))
 
-    # Draw new points in this snake's segment - don't overwrite other snakes
+    # Draw new points in this snake's segment
     if target_upto > bar._drawn_upto[snake_idx]
         for k in (bar._drawn_upto[snake_idx] + 1):target_upto
-            y, x = segment[k]
+            y, x = bar.draw_seq[seg_start + k - 1]
             if 1 <= y <= length(bar.canvas) && 1 <= x <= length(bar.canvas[1])
-                # Only draw if cell is empty
                 if bar.canvas_snake_idx[y][x] == 0
                     bar.canvas[y][x] = bar.ch
                     bar.canvas_colors[y][x] = bar.colors[snake_idx]

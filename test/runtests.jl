@@ -77,7 +77,7 @@ using SnakeBar
 
         # Check all snakes completed their segments
         for i in 1:3
-            expected = length(mbar.snake_segments[i])
+            expected = mbar.segment_boundaries[i+1] - mbar.segment_boundaries[i]
             @test mbar._drawn_upto[i] == expected
         end
 
